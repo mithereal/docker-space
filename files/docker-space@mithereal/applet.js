@@ -1,174 +1,219 @@
 const Applet = imports.ui.applet;
-const St = imports.gi.St;
+const Settings = imports.ui.settings;
+const Gettext = imports.gettext;
 const GLib = imports.gi.GLib;
 const Mainloop = imports.mainloop;
-const PopupMenu = imports.ui.popupMenu;
-const Settings = imports.ui.settings;
 
-class DockerSpaceApplet extends Applet.TextIconApplet {
-constructor(metadata, orientation, panelHeight, instanceId) {
-super(orientation, panelHeight, instanceId);
+const UUID = "docker-space@mithereal";
+Gettext.bindtextdomain(UUID, GLib.get_home_dir() + "/.local/share/locale");
 
-    this.setAllowedLayout(Applet.AllowedLayout.BOTH);
-
-    this.settings = new Settings.AppletSettings(this, metadata.uuid, instanceId);
-    this.settings.bind("selectedType", "selectedType", this._onSettingsChanged);
-    this.settings.bind("refreshInterval", "refreshInterval", this._restartLoop);
-    this.settings.bind("showTotal", "showTotal", this._onSettingsChanged);
-    this.settings.bind("colorize", "colorize", this._onSettingsChanged);
-
-    this.set_applet_icon_name("docker");
-    this.set_applet_tooltip("Docker disk usage");
-
-    this._buildMenu();
-    this._restartLoop();
+function _(str) {
+    return Gettext.dgettext(UUID, str);
 }
 
-_restartLoop() {
-    if (this._timeout) {
-        Mainloop.source_remove(this._timeout);
-    }
+function MyApplet(metadata, orientation, panel_height, instance_id) {
+    this._init(metadata, orientation, panel_height, instance_id);
+}
 
-    this._update();
-    this._timeout = Mainloop.timeout_add_seconds(this.refreshInterval || 10, () => {
+MyApplet.prototype = {
+    __proto__: Applet.IconApplet.prototype,
+
+    _path: '',
+    _timeout: null,
+
+    selectedType: "Images",
+    refreshInterval: 10,
+    showTotal: false,
+
+    _init: function(metadata, orientation, panel_height, instance_id) {
+        Applet.IconApplet.prototype._init.call(this, orientation, panel_height, instance_id);
+
+        this._path = metadata.path;
+
+        this._bind_settings(instance_id);
+
+        this.set_applet_tooltip(_("Docker Space"));
+
         this._update();
-        return true;
-    });
-}
+        this._start_loop();
+    },
 
-_getDockerData() {
-    try {
-        if (!GLib.find_program_in_path("docker")) {
-            return null;
-        }
+    // -------------------------
+    // Settings
+    // -------------------------
+    _bind_settings: function(instance_id) {
+        let settings = new Settings.AppletSettings(this, UUID, instance_id);
 
-        let [ok, out] = GLib.spawn_command_line_sync(
-            "docker system df --format '{{json .}}'"
+        settings.bindProperty(Settings.BindingDirection.IN,
+            "selectedType",
+            "selectedType",
+            this._update,
+            null
         );
 
-        if (!ok) return null;
+        settings.bindProperty(Settings.BindingDirection.IN,
+            "refreshInterval",
+            "refreshInterval",
+            this._restart_loop,
+            null
+        );
 
-        let lines = imports.byteArray.toString(out).trim().split("\n");
-        let result = {};
+        settings.bindProperty(Settings.BindingDirection.IN,
+            "showTotal",
+            "showTotal",
+            this._update,
+            null
+        );
+    },
 
-        lines.forEach(line => {
-            try {
-                let obj = JSON.parse(line);
-                result[obj.Type] = obj.Size;
-            } catch (_) {}
-        });
+    // -------------------------
+    // Loop
+    // -------------------------
+    _start_loop: function() {
+        this._restart_loop();
+    },
 
-        return result;
-    } catch (e) {
-        global.logError(e);
-        return null;
-    }
-}
+    _restart_loop: function() {
+        if (this._timeout) {
+            Mainloop.source_remove(this._timeout);
+        }
 
-_parseSizeToGB(sizeStr) {
-    if (!sizeStr) return 0;
+        this._update();
 
-    let match = sizeStr.match(/([0-9.]+)([KMGTP]?B)/i);
-    if (!match) return 0;
-
-    let value = parseFloat(match[1]);
-    let unit = match[2].toUpperCase();
-
-    const map = {
-        KB: 1 / (1024 * 1024),
-        MB: 1 / 1024,
-        GB: 1,
-        TB: 1024
-    };
-
-    return value * (map[unit] || 0);
-}
-
-_getTotalGB(data) {
-    return Object.values(data)
-        .map(v => this._parseSizeToGB(v))
-        .reduce((a, b) => a + b, 0);
-}
-
-_applyColor(gb) {
-    if (!this.colorize) return;
-
-    let color = "white";
-    if (gb > 20) color = "red";
-    else if (gb > 10) color = "orange";
-    else if (gb > 5) color = "yellow";
-
-    this.actor.set_style(`color: ${color};`);
-}
-
-_update() {
-    let data = this._getDockerData();
-
-    if (!data) {
-        this.set_applet_label("N/A");
-        this.set_applet_tooltip("Docker not available");
-        return;
-    }
-
-    let display;
-    let gbValue = 0;
-
-    if (this.showTotal) {
-        gbValue = this._getTotalGB(data);
-        display = `${gbValue.toFixed(1)} GB`;
-    } else {
-        display = data[this.selectedType] || "?";
-        gbValue = this._parseSizeToGB(display);
-    }
-
-    this.set_applet_label(display);
-    this._applyColor(gbValue);
-
-    let tooltip = Object.entries(data)
-        .map(([k, v]) => `${k}: ${v}`)
-        .join("\n");
-
-    tooltip += `\nTotal: ${this._getTotalGB(data).toFixed(2)} GB`;
-
-    this.set_applet_tooltip(tooltip);
-}
-
-_buildMenu() {
-    this.menu = new Applet.AppletPopupMenu(this, this.orientation);
-    this.menuManager.addMenu(this.menu);
-
-    const types = ["Images", "Containers", "Local Volumes", "Build Cache"];
-
-    types.forEach(type => {
-        let item = new PopupMenu.PopupMenuItem(type);
-        item.connect("activate", () => {
-            this.selectedType = type;
-            this.settings.setValue("selectedType", type);
+        this._timeout = Mainloop.timeout_add_seconds(this.refreshInterval || 10, () => {
             this._update();
+            return true;
         });
-        this.menu.addMenuItem(item);
-    });
+    },
 
-    this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+    // -------------------------
+    // Docker Data
+    // -------------------------
+    _get_docker_data: function() {
+        try {
+            if (!GLib.find_program_in_path("docker")) {
+                return null;
+            }
 
-    let pruneItem = new PopupMenu.PopupMenuItem("Cleanup (docker system prune -f)");
-    pruneItem.connect("activate", () => {
-        GLib.spawn_command_line_async("docker system prune -f");
-    });
+            let [ok, out] = GLib.spawn_command_line_sync(
+                "docker system df --format '{{json .}}'"
+            );
 
-    this.menu.addMenuItem(pruneItem);
-}
+            if (!ok) return null;
 
-on_applet_clicked() {
-    this.menu.toggle();
-}
+            let lines = imports.byteArray.toString(out).trim().split("\n");
+            let result = {};
 
-_onSettingsChanged() {
-    this._update();
-}
+            for (let i = 0; i < lines.length; i++) {
+                try {
+                    let obj = JSON.parse(lines[i]);
+                    result[obj.Type] = obj.Size;
+                } catch (e) {}
+            }
 
-}
+            return result;
+        } catch (e) {
+            global.logError(e);
+            return null;
+        }
+    },
 
-function main(metadata, orientation, panelHeight, instanceId) {
-return new DockerSpaceApplet(metadata, orientation, panelHeight, instanceId);
+    // -------------------------
+    // Size parsing
+    // -------------------------
+    _toGB: function(size) {
+        if (!size) return 0;
+
+        let m = size.match(/([0-9.]+)([KMGTP]?B)/i);
+        if (!m) return 0;
+
+        let val = parseFloat(m[1]);
+        let unit = m[2].toUpperCase();
+
+        let map = {
+            KB: 1 / (1024 * 1024),
+            MB: 1 / 1024,
+            GB: 1,
+            TB: 1024
+        };
+
+        return val * (map[unit] || 0);
+    },
+
+    _total: function(data) {
+        let total = 0;
+        for (let k in data) {
+            total += this._toGB(data[k]);
+        }
+        return total;
+    },
+
+    // -------------------------
+    // Icon progress bar effect
+    // -------------------------
+    _set_icon_by_usage: function(percent) {
+        let level = Math.min(100, Math.max(0, Math.floor(percent)));
+
+        let icon = "whale.png"; // base icon
+
+        // Optional: you can swap icons like:
+        // whale-20.png, whale-40.png, etc.
+        if (level > 80) icon = "whale-full.png";
+        else if (level > 60) icon = "whale-75.png";
+        else if (level > 40) icon = "whale-50.png";
+        else if (level > 20) icon = "whale-25.png";
+        else icon = "whale.png";
+
+        this.set_applet_icon_path(this._path + "/icons/" + icon);
+    },
+
+    // -------------------------
+    // Update
+    // -------------------------
+    _update: function() {
+        let data = this._get_docker_data();
+
+        if (!data) {
+            this.set_applet_label("N/A");
+            this.set_applet_tooltip(_("Docker not available"));
+            return;
+        }
+
+        let display = "";
+        let gb = 0;
+
+        if (this.showTotal) {
+            gb = this._total(data);
+            display = gb.toFixed(1) + " GB";
+        } else {
+            display = data[this.selectedType] || "?";
+            gb = this._toGB(display);
+        }
+
+        let totalGB = this._total(data);
+        let percent = totalGB > 0 ? (gb / totalGB) * 100 : 0;
+
+        this.set_applet_label(display);
+
+        this._set_icon_by_usage(percent);
+
+        let tooltip = "";
+        for (let k in data) {
+            tooltip += k + ": " + data[k] + "\n";
+        }
+
+        tooltip += "Total: " + totalGB.toFixed(2) + " GB";
+        this.set_applet_tooltip(tooltip);
+    },
+
+    // -------------------------
+    // Click
+    // -------------------------
+    on_applet_clicked: function() {
+        this._update();
+    }
+};
+
+function main(metadata, orientation, panel_height, instance_id) {
+    return new MyApplet(metadata, orientation, panel_height, instance_id);
 }
